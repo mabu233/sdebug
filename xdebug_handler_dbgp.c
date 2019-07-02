@@ -244,7 +244,8 @@ static xdebug_str *make_message(xdebug_con *context, xdebug_xml_node *message TS
 
 	xdebug_xml_return_node(message, &xml_message);
 	if (XG(remote_log_file)) {
-		fprintf(XG(remote_log_file), "-> %s\n\n", xml_message.d);
+		long pid = getpid();
+		fprintf(XG(remote_log_file), "[%ld] -> %s\n[%ld]\n", pid, xml_message.d, pid);
 		fflush(XG(remote_log_file));
 	}
 
@@ -258,18 +259,34 @@ static xdebug_str *make_message(xdebug_con *context, xdebug_xml_node *message TS
 	return ret;
 }
 
-static void send_message(xdebug_con *context, xdebug_xml_node *message TSRMLS_DC)
+static void send_message_ex(xdebug_con *context, xdebug_xml_node *message, int stage TSRMLS_DC)
 {
 	xdebug_str *tmp;
 
+	/* Sometimes we end up in 'send_message' although the debugging connection
+	 * is already closed. In that case, we early return. */
+	if (XG(status) != DBGP_STATUS_STARTING && !xdebug_is_debug_connection_active()) {
+		return;
+	}
+
 	tmp = make_message(context, message TSRMLS_CC);
-	if (SSENDL(context->socket, tmp->d, tmp->l) != tmp->l) {
+	if ((size_t) SSENDL(context->socket, tmp->d, tmp->l) != tmp->l) {
 		char *sock_error = php_socket_strerror(php_socket_errno(), NULL, 0);
-		fprintf(stderr, "There was a problem sending %ld bytes on socket %d: %s", tmp->l, context->socket, sock_error);
+		char *utime_str = xdebug_sprintf("%F", xdebug_get_utime());
+
+		fprintf(stderr, "%s: There was a problem sending %zd bytes on socket %d: %s\n", utime_str, tmp->l, context->socket, sock_error);
+
 		efree(sock_error);
+		xdfree(utime_str);
 	}
 	xdebug_str_free(tmp);
 }
+
+static void send_message(xdebug_con *context, xdebug_xml_node *message TSRMLS_DC)
+{
+	send_message_ex(context, message, 0);
+}
+
 
 static xdebug_xml_node* get_symbol(xdebug_str *name, xdebug_var_export_options *options)
 {
@@ -763,7 +780,7 @@ DBGP_FUNC(breakpoint_set)
 	xdebug_brk_info      *brk_info;
 	char                 *tmp_name;
 	int                   brk_id = 0;
-	int                   new_length = 0;
+	size_t                new_length = 0;
 	function_stack_entry *fse;
 	XDEBUG_STR_SWITCH_DECL;
 
@@ -904,7 +921,6 @@ DBGP_FUNC(breakpoint_set)
 
 static int xdebug_do_eval(char *eval_string, zval *ret_zval TSRMLS_DC)
 {
-	int                old_error_reporting;
 	int                old_track_errors;
 	int                res = FAILURE;
 	zend_execute_data *original_execute_data = EG(current_execute_data);
@@ -913,7 +929,8 @@ static int xdebug_do_eval(char *eval_string, zval *ret_zval TSRMLS_DC)
 	jmp_buf           *original_bailout = EG(bailout);
 
 	/* Remember error reporting level and track errors */
-	old_error_reporting = EG(error_reporting);
+	XG(error_reporting_override) = EG(error_reporting);
+	XG(error_reporting_overridden) = 1;
 	old_track_errors = PG(track_errors);
 	EG(error_reporting) = 0;
 	PG(track_errors) = 0;
@@ -934,7 +951,8 @@ static int xdebug_do_eval(char *eval_string, zval *ret_zval TSRMLS_DC)
 	}
 
 	/* Clean up */
-	EG(error_reporting) = old_error_reporting;
+	EG(error_reporting) = XG(error_reporting_override);
+	XG(error_reporting_overridden) = 0;
 	PG(track_errors) = old_track_errors;
 	XG(breakpoints_allowed) = 1;
 
@@ -951,7 +969,7 @@ DBGP_FUNC(eval)
 	char            *eval_string;
 	xdebug_xml_node *ret_xml;
 	zval             ret_zval;
-	int              new_length;
+	size_t           new_length = 0;
 	int              res;
 	xdebug_var_export_options *options;
 
@@ -972,7 +990,7 @@ DBGP_FUNC(eval)
 
 	res = xdebug_do_eval(eval_string, &ret_zval TSRMLS_CC);
 
-	efree(eval_string);
+	xdfree(eval_string);
 
 	/* Handle result */
 	if (res == FAILURE) {
@@ -986,20 +1004,24 @@ DBGP_FUNC(eval)
 
 /* these functions interupt PHP's output functions, so we can
    redirect to our remote debugger! */
-static int xdebug_send_stream(const char *name, const char *str, uint str_length TSRMLS_DC)
+static void xdebug_send_stream(const char *name, const char *str, uint str_length TSRMLS_DC)
 {
 	/* create an xml document to send as the stream */
 	xdebug_xml_node *message;
 
+	if (!xdebug_is_debug_connection_active()) {
+		return;
+	}
+
 	message = xdebug_xml_node_init("stream");
 	xdebug_xml_add_attribute(message, "xmlns", "urn:debugger_protocol_v1");
-	xdebug_xml_add_attribute(message, "xmlns:xdebug", "http://xdebug.org/dbgp/xdebug");
+	xdebug_xml_add_attribute(message, "xmlns:xdebug", "https://xdebug.org/dbgp/xdebug");
 	xdebug_xml_add_attribute_ex(message, "type", (char *)name, 0, 0);
 	xdebug_xml_add_text_encodel(message, xdstrndup(str, str_length), str_length);
 	send_message(&XG(context), message TSRMLS_CC);
 	xdebug_xml_node_dtor(message);
 
-	return 0;
+	return;
 }
 
 
@@ -1081,8 +1103,9 @@ DBGP_FUNC(detach)
 	xdebug_xml_add_attribute(*retval, "status", xdebug_dbgp_status_strings[DBGP_STATUS_STOPPED]);
 	xdebug_xml_add_attribute(*retval, "reason", xdebug_dbgp_reason_strings[XG(reason)]);
 	XG(context).handler->remote_deinit(&(XG(context)));
-	XG(remote_enabled) = 0;
+	xdebug_mark_debug_connection_not_active();
 	XG(stdout_mode) = 0;
+	XG(remote_enable) = 0;
 }
 
 
@@ -1425,11 +1448,12 @@ static void set_vars_from_EG(TSRMLS_D)
 DBGP_FUNC(property_set)
 {
 	unsigned char             *new_value;
-	int                        new_length;
+	size_t                     new_length = 0;
 	int                        depth = 0;
 	int                        context_nr = 0;
 	int                        res;
 	char                      *eval_string;
+	const char                *cast_as;
 	zval                       ret_zval;
 	function_stack_entry      *fse;
 	xdebug_var_export_options *options = (xdebug_var_export_options*) context->options;
@@ -1480,73 +1504,62 @@ DBGP_FUNC(property_set)
 
 	new_value = xdebug_base64_decode((unsigned char*) CMD_OPTION_CHAR('-'), CMD_OPTION_LEN('-'), &new_length);
 
+	/* Set a cast, if requested through the 't' option */
+	cast_as = "";
+
 	if (CMD_OPTION_SET('t')) {
-		zval symbol;
-		xdebug_get_php_symbol(&symbol, CMD_OPTION_XDEBUG_STR('n'));
+		XDEBUG_STR_SWITCH(CMD_OPTION_CHAR('t')) {
+			XDEBUG_STR_CASE("bool")
+				cast_as = "(bool) ";
+			XDEBUG_STR_CASE_END
 
-		/* Handle result */
-		if (Z_TYPE(symbol) == IS_UNDEF) {
-			efree(new_value);
-			RETURN_RESULT(XG(status), XG(reason), XDEBUG_ERROR_PROPERTY_NON_EXISTENT);
-		} else {
-			// TODO Doesn't make sense anymore in this form
-			zval_ptr_dtor_nogc(&symbol);
-			ZVAL_STRINGL(&symbol, (char*) new_value, new_length);
-			xdebug_xml_add_attribute(*retval, "success", "1");
+			XDEBUG_STR_CASE("int")
+				cast_as = "(int) ";
+			XDEBUG_STR_CASE_END
 
-			XDEBUG_STR_SWITCH(CMD_OPTION_CHAR('t')) {
-				XDEBUG_STR_CASE("bool")
-					convert_to_boolean(&symbol);
-				XDEBUG_STR_CASE_END
+			XDEBUG_STR_CASE("float")
+				cast_as = "(float) ";
+			XDEBUG_STR_CASE_END
 
-				XDEBUG_STR_CASE("int")
-					convert_to_long(&symbol);
-				XDEBUG_STR_CASE_END
+			XDEBUG_STR_CASE("string")
+				cast_as = "(string) ";
+			XDEBUG_STR_CASE_END
 
-				XDEBUG_STR_CASE("float")
-					convert_to_double(&symbol);
-				XDEBUG_STR_CASE_END
-
-				XDEBUG_STR_CASE("string")
-					/* do nothing */
-				XDEBUG_STR_CASE_END
-
-				XDEBUG_STR_CASE_DEFAULT
-					xdebug_xml_add_attribute(*retval, "success", "0");
-				XDEBUG_STR_CASE_DEFAULT_END
-			}
+			XDEBUG_STR_CASE_DEFAULT
+				xdebug_xml_add_attribute(*retval, "success", "0");
+			XDEBUG_STR_CASE_DEFAULT_END
 		}
+	}
+
+	/* backup executor state */
+	if (depth > 0) {
+		original_execute_data = EG(current_execute_data);
+
+		EG(current_execute_data) = XG(active_execute_data);
+		set_vars_from_EG(TSRMLS_C);
+	}
+
+	/* Do the eval */
+	eval_string = xdebug_sprintf("%s = %s %s", CMD_OPTION_CHAR('n'), cast_as, new_value);
+	res = xdebug_do_eval(eval_string, &ret_zval TSRMLS_CC);
+
+	/* restore executor state */
+	if (depth > 0) {
+		EG(current_execute_data) = original_execute_data;
+		set_vars_from_EG(TSRMLS_C);
+	}
+
+	/* Free data */
+	xdfree(eval_string);
+	xdfree(new_value);
+
+	/* Handle result */
+	if (res == FAILURE) {
+		/* don't send an error, send success = zero */
+		xdebug_xml_add_attribute(*retval, "success", "0");
 	} else {
-		/* backup executor state */
-		if (depth > 0) {
-			original_execute_data = EG(current_execute_data);
-
-			EG(current_execute_data) = XG(active_execute_data);
-			set_vars_from_EG(TSRMLS_C);
-		}
-
-		/* Do the eval */
-		eval_string = xdebug_sprintf("%s = %s", CMD_OPTION_CHAR('n'), new_value);
-		res = xdebug_do_eval(eval_string, &ret_zval TSRMLS_CC);
-
-		/* restore executor state */
-		if (depth > 0) {
-			EG(current_execute_data) = original_execute_data;
-			set_vars_from_EG(TSRMLS_C);
-		}
-
-		/* Free data */
-		xdfree(eval_string);
-		efree(new_value);
-
-		/* Handle result */
-		if (res == FAILURE) {
-			/* don't send an error, send success = zero */
-			xdebug_xml_add_attribute(*retval, "success", "0");
-		} else {
-			zval_dtor(&ret_zval);
-			xdebug_xml_add_attribute(*retval, "success", "1");
-		}
+		zval_dtor(&ret_zval);
+		xdebug_xml_add_attribute(*retval, "success", "1");
 	}
 }
 
@@ -1721,7 +1734,7 @@ static int attach_context_vars(xdebug_xml_node *node, xdebug_var_export_options 
 				continue;
 			}
 
-			if (val->module_number != PHP_USER_CONSTANT) {
+			if (XDEBUG_ZEND_CONSTANT_MODULE_NUMBER(val) != PHP_USER_CONSTANT) {
 				/* we're only interested in user defined constants */
 				continue;
 			}
@@ -2078,7 +2091,8 @@ static int xdebug_dbgp_parse_option(xdebug_con *context, char* line, int flags, 
 	xdebug_xml_node *error;
 
 	if (XG(remote_log_file)) {
-		fprintf(XG(remote_log_file), "<- %s\n", line);
+		long pid = getpid();
+		fprintf(XG(remote_log_file), "[%ld] <- %s\n", pid, line);
 		fflush(XG(remote_log_file));
 	}
 	res = xdebug_dbgp_parse_cmd(line, (char**) &cmd, (xdebug_dbgp_arg**) &args);
@@ -2164,7 +2178,7 @@ static int xdebug_dbgp_cmdloop(xdebug_con *context, int bail TSRMLS_DC)
 
 		response = xdebug_xml_node_init("response");
 		xdebug_xml_add_attribute(response, "xmlns", "urn:debugger_protocol_v1");
-		xdebug_xml_add_attribute(response, "xmlns:xdebug", "http://xdebug.org/dbgp/xdebug");
+		xdebug_xml_add_attribute(response, "xmlns:xdebug", "https://xdebug.org/dbgp/xdebug");
 		ret = xdebug_dbgp_parse_option(context, option, 0, response TSRMLS_CC);
 		if (ret != 1) {
 			send_message(context, response TSRMLS_CC);
@@ -2201,7 +2215,7 @@ int xdebug_dbgp_init(xdebug_con *context, int mode)
 
 	response = xdebug_xml_node_init("init");
 	xdebug_xml_add_attribute(response, "xmlns", "urn:debugger_protocol_v1");
-	xdebug_xml_add_attribute(response, "xmlns:xdebug", "http://xdebug.org/dbgp/xdebug");
+	xdebug_xml_add_attribute(response, "xmlns:xdebug", "https://xdebug.org/dbgp/xdebug");
 
 /* {{{ XML Init Stuff*/
 	child = xdebug_xml_node_init("engine");
@@ -2243,7 +2257,7 @@ int xdebug_dbgp_init(xdebug_con *context, int mode)
 	context->buffer->buffer = NULL;
 	context->buffer->buffer_size = 0;
 
-	send_message(context, response TSRMLS_CC);
+	send_message_ex(context, response, DBGP_STATUS_STARTING TSRMLS_CC);
 	xdebug_xml_node_dtor(response);
 /* }}} */
 
@@ -2281,12 +2295,12 @@ int xdebug_dbgp_deinit(xdebug_con *context)
 	xdebug_var_export_options *options;
 	TSRMLS_FETCH();
 
-	if (XG(remote_enabled)) {
+	if (xdebug_is_debug_connection_active_for_current_pid()) {
 		XG(status) = DBGP_STATUS_STOPPING;
 		XG(reason) = DBGP_REASON_OK;
 		response = xdebug_xml_node_init("response");
 		xdebug_xml_add_attribute(response, "xmlns", "urn:debugger_protocol_v1");
-		xdebug_xml_add_attribute(response, "xmlns:xdebug", "http://xdebug.org/dbgp/xdebug");
+		xdebug_xml_add_attribute(response, "xmlns:xdebug", "https://xdebug.org/dbgp/xdebug");
 		/* lastcmd and lasttransid are not always set (for example when the
 		 * connection is severed before the first command is send) */
 		if (XG(lastcmd) && XG(lasttransid)) {
@@ -2302,7 +2316,7 @@ int xdebug_dbgp_deinit(xdebug_con *context)
 		xdebug_dbgp_cmdloop(context, 0 TSRMLS_CC);
 	}
 
-	if (XG(remote_enabled)) {
+	if (xdebug_is_debug_connection_active_for_current_pid()) {
 		options = (xdebug_var_export_options*) context->options;
 		xdfree(options->runtime);
 		xdfree(context->options);
@@ -2312,10 +2326,14 @@ int xdebug_dbgp_deinit(xdebug_con *context)
 		xdebug_llist_destroy(context->line_breakpoints, NULL);
 		xdebug_hash_destroy(context->breakpoint_list);
 		xdfree(context->buffer);
+		context->buffer = NULL;
 	}
 
-	xdebug_close_log(TSRMLS_C);
-	XG(remote_enabled) = 0;
+	if (XG(lasttransid)) {
+		xdfree(XG(lasttransid));
+		XG(lasttransid) = NULL;
+	}
+	xdebug_mark_debug_connection_not_active();
 	return 1;
 }
 
@@ -2361,7 +2379,7 @@ int xdebug_dbgp_error(xdebug_con *context, int type, char *exception_type, char 
 
 	response = xdebug_xml_node_init("response");
 	xdebug_xml_add_attribute(response, "xmlns", "urn:debugger_protocol_v1");
-	xdebug_xml_add_attribute(response, "xmlns:xdebug", "http://xdebug.org/dbgp/xdebug");
+	xdebug_xml_add_attribute(response, "xmlns:xdebug", "https://xdebug.org/dbgp/xdebug");
 	/* lastcmd and lasttransid are not always set (for example when the
 	 * connection is severed before the first command is send) */
 	if (XG(lastcmd) && XG(lasttransid)) {
@@ -2398,7 +2416,7 @@ int xdebug_dbgp_breakpoint(xdebug_con *context, xdebug_llist *stack, char *file,
 
 	response = xdebug_xml_node_init("response");
 	xdebug_xml_add_attribute(response, "xmlns", "urn:debugger_protocol_v1");
-	xdebug_xml_add_attribute(response, "xmlns:xdebug", "http://xdebug.org/dbgp/xdebug");
+	xdebug_xml_add_attribute(response, "xmlns:xdebug", "https://xdebug.org/dbgp/xdebug");
 	/* lastcmd and lasttransid are not always set (for example when the
 	 * connection is severed before the first command is send) */
 	if (XG(lastcmd) && XG(lasttransid)) {
@@ -2465,7 +2483,7 @@ int xdebug_dbgp_notification(xdebug_con *context, const char *file, long lineno,
 
 	response = xdebug_xml_node_init("notify");
 	xdebug_xml_add_attribute(response, "xmlns", "urn:debugger_protocol_v1");
-	xdebug_xml_add_attribute(response, "xmlns:xdebug", "http://xdebug.org/dbgp/xdebug");
+	xdebug_xml_add_attribute(response, "xmlns:xdebug", "https://xdebug.org/dbgp/xdebug");
 	xdebug_xml_add_attribute(response, "name", "error");
 
 	error_container = xdebug_xml_node_init("xdebug:message");

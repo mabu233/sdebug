@@ -1,5 +1,5 @@
 --TEST--
-Test for bug #1509: Code coverage missing for case inside switch with PHP 7.2
+Test for bug #1509: Code coverage missing for case inside switch (>= PHP 7.2)
 --SKIPIF--
 <?php
 if (!version_compare(phpversion(), "7.2", '>=')) echo "skip >= PHP 7.2 needed\n";

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | Xdebug                                                               |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2002-2018 Derick Rethans                               |
+   | Copyright (c) 2002-2019 Derick Rethans                               |
    +----------------------------------------------------------------------+
    | This source file is subject to version 1.01 of the Xdebug license,   |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,12 +20,12 @@
 #define PHP_XDEBUG_H
 
 #define XDEBUG_NAME       "Sdebug"
-#define XDEBUG_VERSION    "2.6.1-dev"
+#define XDEBUG_VERSION    "2.7.3-dev"
 #define XDEBUG_AUTHOR     "Derick Rethans"
-#define XDEBUG_COPYRIGHT  "Copyright (c) 2002-2018 by Derick Rethans"
-#define XDEBUG_COPYRIGHT_SHORT "Copyright (c) 2002-2018"
-#define XDEBUG_URL        "http://xdebug.org"
-#define XDEBUG_URL_FAQ    "http://xdebug.org/docs/faq#api"
+#define XDEBUG_COPYRIGHT  "Copyright (c) 2002-2019 by Derick Rethans"
+#define XDEBUG_COPYRIGHT_SHORT "Copyright (c) 2002-2019"
+#define XDEBUG_URL        "https://xdebug.org"
+#define XDEBUG_URL_FAQ    "https://xdebug.org/docs/faq#api"
 
 #include "php.h"
 
@@ -82,6 +82,7 @@ PHP_FUNCTION(xdebug_call_file);
 PHP_FUNCTION(xdebug_call_line);
 
 PHP_FUNCTION(xdebug_set_time_limit);
+PHP_FUNCTION(xdebug_error_reporting);
 PHP_FUNCTION(xdebug_pcntl_exec);
 
 PHP_FUNCTION(xdebug_var_dump);
@@ -166,9 +167,11 @@ ZEND_BEGIN_MODULE_GLOBALS(xdebug)
 	zend_long     halt_level;
 
 	zend_long     overload_var_dump;
-	void        (*orig_var_dump_func)(INTERNAL_FUNCTION_PARAMETERS);
-	void        (*orig_set_time_limit_func)(INTERNAL_FUNCTION_PARAMETERS);
-	void        (*orig_pcntl_exec_func)(INTERNAL_FUNCTION_PARAMETERS);
+
+	zif_handler   orig_var_dump_func;
+	zif_handler   orig_set_time_limit_func;
+	zif_handler   orig_error_reporting_func;
+	zif_handler   orig_pcntl_exec_func;
 
 	xdebug_trace_handler_t *trace_handler;
 	void         *trace_context;
@@ -190,7 +193,7 @@ ZEND_BEGIN_MODULE_GLOBALS(xdebug)
 	zend_long     display_max_data;
 	zend_long     display_max_depth;
 
-	zend_bool     cli_color;
+	zend_long     cli_color;
 	int           output_is_tty;
 
 	/* used for code coverage */
@@ -259,11 +262,14 @@ ZEND_BEGIN_MODULE_GLOBALS(xdebug)
 	char         *ide_key_setting; /* Set through php.ini and friends */
 
 	/* remote debugging globals */
-	zend_bool     remote_enabled;
+	zend_bool     remote_connection_enabled;
+	pid_t         remote_connection_pid;
 	zend_bool     breakpoints_allowed;
 	xdebug_con    context;
 	unsigned int  breakpoint_count;
 	unsigned int  no_exec;
+	zend_long     error_reporting_override;
+	zend_bool     error_reporting_overridden;
 
 	/* profiler settings */
 	zend_bool     profiler_enable;

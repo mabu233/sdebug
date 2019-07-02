@@ -2,6 +2,7 @@
 Test for Xdebug's remote log (with xdebug.remote_addr_header value)
 --SKIPIF--
 <?php if (substr(PHP_OS, 0, 3) == "WIN") die("skip Not for Windows"); ?>
+<?php if (getenv("SKIP_DBGP_TESTS")) { exit("skip Excluding DBGp tests"); } ?>
 --ENV--
 I_LIKE_COOKIES=doesnotexist3
 --INI--
@@ -20,18 +21,19 @@ unlink (sys_get_temp_dir() . "/remote-log4.txt");
 ?>
 --EXPECTF--
 3
-Log opened at %d-%d-%d %d:%d:%d
-I: Checking remote connect back address.
-I: Checking user configured header 'I_LIKE_COOKIES'.
-I: Remote address found, connecting to doesnotexist3:9003.
-W: Creating socket for 'doesnotexist3:9003', getaddrinfo: %s.
-E: Could not connect to client. :-(
-Log closed at %d-%d-%d %d:%d:%d
-
-Log opened at %d-%d-%d %d:%d:%d
-I: Checking remote connect back address.
-I: Checking user configured header 'I_LIKE_COOKIES'.
-I: Remote address found, connecting to doesnotexist3:9003.
-W: Creating socket for 'doesnotexist3:9003', getaddrinfo: %s.
-E: Could not connect to client. :-(
-Log closed at %d-%d-%d %d:%d:%d
+[%d] Log opened at %d-%d-%d %d:%d:%d
+[%d] I: Checking remote connect back address.
+[%d] I: Checking user configured header 'I_LIKE_COOKIES'.
+[%d] I: Remote address found, connecting to doesnotexist3:9003.
+[%d] W: Creating socket for 'doesnotexist3:9003', getaddrinfo: %s.
+[%d] E: Could not connect to client. :-(
+[%d] Log closed at %d-%d-%d %d:%d:%d
+[%d]
+[%d] Log opened at %d-%d-%d %d:%d:%d
+[%d] I: Checking remote connect back address.
+[%d] I: Checking user configured header 'I_LIKE_COOKIES'.
+[%d] I: Remote address found, connecting to doesnotexist3:9003.
+[%d] W: Creating socket for 'doesnotexist3:9003', getaddrinfo: %s.
+[%d] E: Could not connect to client. :-(
+[%d] Log closed at %d-%d-%d %d:%d:%d
+[%d]
